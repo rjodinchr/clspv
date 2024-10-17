@@ -1,0 +1,186 @@
+import("//build_overrides/clspv.gni")
+import("//build_overrides/spirv_tools.gni")
+
+source_set("clspv_passes") {
+  sources = [
+    "AddFunctionAttributesPass.cpp",
+    "AllocateDescriptorsPass.cpp",
+    "AnnotationToMetadataPass.cpp",
+    "ArgKind.cpp",
+    "AutoPodArgsPass.cpp",
+    "BitcastUtils.cpp",
+    "Builtins.cpp",
+    "CallGraphOrderedFunctions.cpp",
+    "ClusterConstants.cpp",
+    "ClusterPodKernelArgumentsPass.cpp",
+    "ComputeStructuredOrder.cpp",
+    "ConstantEmitter.cpp",
+    "Constants.cpp",
+    "DeclarePushConstantsPass.cpp",
+    "DefineOpenCLWorkItemBuiltinsPass.cpp",
+    "DescriptorCounter.cpp",
+    "DirectResourceAccessPass.cpp",
+    "FeatureMacro.cpp",
+    "FixupBuiltinsPass.cpp",
+    "FixupStructuredCFGPass.cpp",
+    "FunctionInternalizerPass.cpp",
+    "HideConstantLoadsPass.cpp",
+    "InlineEntryPointsPass.cpp",
+    "InlineFuncWithImageMetadataGetterPass.cpp",
+    "InlineFuncWithPointerBitCastArgPass.cpp",
+    "InlineFuncWithPointerToFunctionArgPass.cpp",
+    "InlineFuncWithReadImage3DNonLiteralSampler.cpp",
+    "InlineFuncWithSingleCallSitePass.cpp",
+    "KernelArgNamesToMetadataPass.cpp",
+    "Layout.cpp",
+    "LogicalPointerToIntPass.cpp",
+    "LongVectorLoweringPass.cpp",
+    "LowerAddrSpaceCastPass.cpp",
+    "LowerPrivatePointerPHIPass.cpp",
+    "MultiVersionUBOFunctionsPass.cpp",
+    "NativeMathPass.cpp",
+    "NormalizeGlobalVariable.cpp",
+    "OpenCLInlinerPass.cpp",
+    "Option.cpp",
+    "Passes.cpp",
+    "PhysicalPointerArgsPass.cpp",
+    "PrintfPass.cpp",
+    "PushConstant.cpp",
+    "RemoveUnusedArguments.cpp",
+    "ReorderBasicBlocksPass.cpp",
+    "ReplaceLLVMIntrinsicsPass.cpp",
+    "ReplaceOpenCLBuiltinPass.cpp",
+    "ReplacePointerBitcastPass.cpp",
+    "RewriteInsertsPass.cpp",
+    "RewritePackedStructs.cpp",
+    "SPIRVOp.cpp",
+    "SPIRVProducerPass.cpp",
+    "SamplerUtils.cpp",
+    "ScalarizePass.cpp",
+    "SetImageMetadataPass.cpp",
+    "ShareModuleScopeVariables.cpp",
+    "SignedCompareFixupPass.cpp",
+    "SimplifyPointerBitcastPass.cpp",
+    "SpecConstant.cpp",
+    "SpecializeImageTypes.cpp",
+    "SplatArgPass.cpp",
+    "SplatSelectCondition.cpp",
+    "StripFreezePass.cpp",
+    "ThreeElementVectorLoweringPass.cpp",
+    "Types.cpp",
+    "UBOTypeTransformPass.cpp",
+    "UndoBoolPass.cpp",
+    "UndoByvalPass.cpp",
+    "UndoGetElementPtrConstantExprPass.cpp",
+    "UndoInstCombinePass.cpp",
+    "UndoSRetPass.cpp",
+    "UndoTranslateSamplerFoldPass.cpp",
+    "UndoTruncateToOddIntegerPass.cpp",
+    "WrapKernelPass.cpp",
+    "ZeroInitializeAllocasPass.cpp",
+  ]
+
+  deps = [
+    "../:clspv_c_strings",
+    "../:clspv_glsl",
+    "../:clspv_reflection",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/AggressiveInstCombine",
+    "${clspv_llvm_dir}/llvm/lib/Analysis",
+    "${clspv_llvm_dir}/llvm/lib/CodeGen",
+    "${clspv_llvm_dir}/llvm/lib/IR", # LLVMCore
+    "${clspv_llvm_dir}/llvm/lib/Transforms/InstCombine",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Instrumentation",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/ObjCARC", # LLVMObjCARCOpts
+    "${clspv_llvm_dir}/llvm/lib/Passes",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Scalar", # LLVMScalarOpts
+    "${clspv_llvm_dir}/llvm/lib/Support",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Utils", # LLVMTransformUtils
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Vectorize",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/IPO",
+  ]
+
+  include_dirs = [
+    "../include", # CLSPV_INCLUDE_DIRS
+    "${spirv_tools_spirv_headers_dir}/include", # SPIRV_HEADERS_INCLUDE_DIRS
+
+    # LLVM_INCLUDE_DIRS
+    "${clspv_llvm_dir}/llvm/include",
+    "${root_gen_dir}/${clspv_llvm_dir}/llvm/include",
+
+    # CLANG_INCLUDE_DIRS
+    "${root_gen_dir}/third_party/llvm/tools/clang/include",
+    "${clspv_llvm_dir}/${clspv_llvm_dir}/clang/include",
+
+    "${root_gen_dir}/${clspv_dir}",
+  ]
+
+  configs += clspv_configs_to_append
+  configs -= clspv_configs_to_remove
+}
+
+template("clspv_static_shared_library") {
+  static_library("${target_name}_static") {
+    forward_variables_from(invoker, "*")
+    configs += clspv_configs_to_append
+    configs -= clspv_configs_to_remove
+  }
+  shared_library("${target_name}_shared") {
+    forward_variables_from(invoker, "*")
+    configs += clspv_configs_to_append
+    configs -= clspv_configs_to_remove
+    if (is_android) {
+      # Removing this config, otherwise clspv API will not be visable
+      configs -= [ "//build/config/android:hide_all_but_jni_onload" ]
+    }
+  }
+}
+
+clspv_static_shared_library("clspv_core") {
+  deps = [
+    ":clspv_passes",
+    "../:clspv64_builtin_library",
+    "../:clspv_baked_opencl_header",
+    "../:clspv_builtin_library",
+    "${clspv_llvm_dir}/llvm/lib/IRReader",
+    "${clspv_llvm_dir}/llvm/lib/Linker",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/AggressiveInstCombine",
+    "${clspv_llvm_dir}/llvm/lib/Analysis",
+    "${clspv_llvm_dir}/llvm/lib/CodeGen",
+    "${clspv_llvm_dir}/llvm/lib/IR", # LLVMCore
+    "${clspv_llvm_dir}/llvm/lib/Transforms/InstCombine",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Instrumentation",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/ObjCARC", # LLVMObjCARCOpts
+    "${clspv_llvm_dir}/llvm/lib/Passes",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Scalar", # LLVMScalarOpts
+    "${clspv_llvm_dir}/llvm/lib/Support",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Utils", # LLVMTransformUtils
+    "${clspv_llvm_dir}/llvm/lib/Transforms/Vectorize",
+    "${clspv_llvm_dir}/llvm/lib/Transforms/IPO",
+    "${clspv_llvm_dir}/clang/lib/AST", # clangAST
+    "${clspv_llvm_dir}/clang/lib/Basic", # clangBasic
+    "${clspv_llvm_dir}/clang/lib/CodeGen", # clangCodeGen
+    "${clspv_llvm_dir}/clang/lib/Frontend", # clangFrontend
+    "${clspv_llvm_dir}/clang/lib/Serialization", # clangSerialization
+  ]
+
+  sources = [
+    "Compiler.cpp",
+    "FrontendPlugin.cpp",
+    "Sampler.cpp",
+  ]
+
+  include_dirs = [
+    "../include", # CLSPV_INCLUDE_DIRS
+    "${spirv_tools_spirv_headers_dir}/include", # SPIRV_HEADERS_INCLUDE_DIRS
+
+    # LLVM_INCLUDE_DIRS
+    "${clspv_llvm_dir}/llvm/include",
+    "${root_gen_dir}/${clspv_llvm_dir}/llvm/include",
+
+    # CLANG_INCLUDE_DIRS
+    "${root_gen_dir}/${clspv_llvm_dir}/clang/include", # CLSPV_LLVM_BINARY_DIR/tools/clang/include
+    "${clspv_llvm_dir}/clang/include",
+
+    "${root_gen_dir}/${clspv_dir}",
+  ]
+}

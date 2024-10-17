@@ -1,0 +1,19 @@
+import("//build_overrides/clspv.gni")
+
+executable("clspv-opt") {
+  sources = [ "main.cpp" ]
+
+  include_dirs = [
+    "../../include",
+    "${clspv_llvm_dir}/llvm/include",
+    "${clspv_llvm_dir}/llvm/tools/opt",
+    "${root_gen_dir}/${clspv_llvm_dir}/llvm/include",
+  ]
+
+  deps = [
+    "../../lib:clspv_passes",
+  ]
+
+  configs += clspv_configs_to_append
+  configs -= clspv_configs_to_remove
+}
