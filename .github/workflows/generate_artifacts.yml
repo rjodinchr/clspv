@@ -1,0 +1,27 @@
+name: Generate windows artifact
+on:
+  push:
+
+jobs:
+  build:
+    name: Build windows artifact
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Ninja
+        uses: ./.github/actions/setup-ninja
+      - name: Fetch dependencies
+        run: python3 ./utils/fetch_sources.py --shallow
+      - name: Make archive
+        shell: bash
+        run: |
+          set -x
+          bash utils/make_artifact_windows_x64.sh
+          echo "installdir=$(realpath build-artifact*/clspv-*)" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifact
+          path: '${{ env.installdir }}'
+
