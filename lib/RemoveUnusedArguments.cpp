@@ -30,8 +30,10 @@ PreservedAnalyses clspv::RemoveUnusedArguments::run(Module &M,
                                                     ModuleAnalysisManager &) {
   PreservedAnalyses PA;
   std::vector<Candidate> candidates;
-  findCandidates(M, &candidates);
-  removeUnusedParameters(M, candidates);
+  while (findCandidates(M, &candidates)) {
+    removeUnusedParameters(M, candidates);
+    candidates.clear();
+  }
 
   return PA;
 }
