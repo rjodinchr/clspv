@@ -2515,10 +2515,19 @@ SPIRVID SPIRVProducerPassImpl::getSPIRVConstant(Constant *C, Type *TyHint) {
     Cst = UndefValue::get(Cst->getType());
   }
 
+  SPIRVID PtrTypeID;
+  if (Cst->getType()->isPointerTy()) {
+    auto *inferred_ty =
+        clspv::InferType(Cst, Cst->getContext(), &InferredTypeCache, TyHint);
+    PtrTypeID = getSPIRVPointerType(Cst->getType(), inferred_ty);
+  }
+
   auto VI = VMap.find(Cst);
   if (VI != VMap.end()) {
     assert(VI->second.isValid());
-    return VI->second;
+    if (!PtrTypeID.isValid() || IDTypeMap[VI->second.get()] == PtrTypeID) {
+      return VI->second;
+    }
   }
 
   SPIRVID RID;
@@ -2531,9 +2540,7 @@ SPIRVID SPIRVProducerPassImpl::getSPIRVConstant(Constant *C, Type *TyHint) {
   SPIRVOperandVec Ops;
 
   if (Cst->getType()->isPointerTy()) {
-    auto *inferred_ty =
-        clspv::InferType(Cst, Cst->getContext(), &InferredTypeCache, TyHint);
-    Ops << getSPIRVPointerType(Cst->getType(), inferred_ty);
+    Ops << PtrTypeID;
   } else {
     Ops << Cst->getType();
   }
@@ -2713,6 +2720,10 @@ SPIRVID SPIRVProducerPassImpl::getSPIRVConstant(Constant *C, Type *TyHint) {
 }
 
 SPIRVID SPIRVProducerPassImpl::getSPIRVValue(Value *V, Type *TyHint) {
+  if (V->getType()->isPointerTy() &&
+      (isa<ConstantPointerNull>(V) || isa<UndefValue>(V))) {
+    return getSPIRVConstant(cast<Constant>(V), TyHint);
+  }
   auto II = ValueMap.find(V);
   if (II != ValueMap.end()) {
     assert(II->second.isValid());
@@ -2731,7 +2742,7 @@ SPIRVID SPIRVProducerPassImpl::getSPIRVValue(Value *V, Type *TyHint) {
 SPIRVID
 SPIRVProducerPassImpl::getSPIRVPointerOperand(Value *PtrVal,
                                               Type *ExpectedPointeeTy) {
-  SPIRVID PtrID = getSPIRVValue(PtrVal);
+  SPIRVID PtrID = getSPIRVValue(PtrVal, ExpectedPointeeTy);
   if (!PtrVal->getType()->isPointerTy()) {
     return PtrID;
   }

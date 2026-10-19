@@ -305,19 +305,66 @@ Type *SmallerTypeNotAliasing(const DataLayout &DL, Type *TyA, Type *TyB) {
 
 // Returns the type of |v| inferred by inspecting its users.
 // Updates |cache|.
+bool CanGEPAliasComposite(Type *composite_ty, GEPOperator *gep) {
+  Type *target_ty = gep->getSourceElementType();
+  if (composite_ty == target_ty || gep->getNumOperands() <= 1)
+    return true;
+  auto *cst0 = dyn_cast<ConstantInt>(gep->getOperand(1));
+  if (!cst0)
+    return false;
+  if (cst0->isZero())
+    return true;
+  uint64_t idx = cst0->getZExtValue();
+  Type *curr = composite_ty;
+  while (curr != target_ty) {
+    if (auto *st = dyn_cast<StructType>(curr)) {
+      if (st->isOpaque() || st->getNumElements() == 0)
+        return false;
+      if (st->getElementType(0) == target_ty) {
+        return BitcastUtils::IsArrayLike(st) && idx < st->getNumElements();
+      }
+      curr = st->getElementType(0);
+    } else if (auto *arr = dyn_cast<ArrayType>(curr)) {
+      if (arr->getElementType() == target_ty) {
+        return idx < arr->getNumElements();
+      }
+      curr = arr->getElementType();
+    } else if (auto *vec = dyn_cast<FixedVectorType>(curr)) {
+      if (vec->getElementType() == target_ty) {
+        return idx < vec->getNumElements();
+      }
+      curr = vec->getElementType();
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
 Type *InferUsersType(Value *v, LLVMContext &context,
                      DenseMap<Value *, Type *> *cache) {
   std::vector<std::pair<User *, unsigned>> worklist;
+  SmallVector<GEPOperator *, 8> direct_geps;
   if (v->use_empty()) {
     return nullptr;
   }
 
   for (auto &use : v->uses()) {
     worklist.push_back(std::make_pair(use.getUser(), use.getOperandNo()));
+    if (auto *gep = dyn_cast<GEPOperator>(use.getUser())) {
+      if (use.getOperandNo() == 0) {
+        direct_geps.push_back(gep);
+      }
+    }
   }
 
   Type *backup_ty = nullptr;
   Type *user_ty = nullptr;
+  Type *composite_ty = nullptr;
+  bool can_alias_composite = isa<Argument>(v) &&
+                             cast<Argument>(v)->getParent()->getCallingConv() !=
+                                 CallingConv::SPIR_KERNEL &&
+                             !clspv::IsPhysicalSSBOType(v->getType());
   DenseSet<Value *> seen;
   while (!worklist.empty()) {
     User *user = worklist.back().first;
@@ -338,6 +385,25 @@ Type *InferUsersType(Value *v, LLVMContext &context,
     Type *user_backup_ty = nullptr;
     Type *ty = InferUserType(user, isPointerTy, operand, user_backup_ty,
                              context, cache, v);
+    if (ty && can_alias_composite) {
+      if (!composite_ty) {
+        composite_ty = ty;
+      } else if (composite_ty != ty) {
+        int steps = 0;
+        bool perfect_match = false;
+        if (BitcastUtils::FindAliasingContainedType(composite_ty, ty, steps,
+                                                    perfect_match, DL, false) &&
+            perfect_match) {
+          // Keep composite_ty.
+        } else if (BitcastUtils::FindAliasingContainedType(
+                       ty, composite_ty, steps, perfect_match, DL, false) &&
+                   perfect_match) {
+          composite_ty = ty;
+        } else {
+          can_alias_composite = false;
+        }
+      }
+    }
     user_ty = SmallerTypeNotAliasing(DL, user_ty, ty);
     if (user_ty == nullptr) {
       backup_ty = SmallerTypeNotAliasing(DL, backup_ty, user_backup_ty);
@@ -348,7 +414,36 @@ Type *InferUsersType(Value *v, LLVMContext &context,
       // Handle stores with only pointer operands.
       if (auto *store = dyn_cast<StoreInst>(user)) {
         if (store->getPointerOperand() != v) {
-          user = dyn_cast<User>(store->getPointerOperand());
+          Value *base_ptr = store->getPointerOperand();
+          while (auto *gep = dyn_cast<GEPOperator>(base_ptr)) {
+            base_ptr = gep->getPointerOperand();
+          }
+          SmallVector<Value *, 8> ptr_containers{base_ptr};
+          SmallPtrSet<Value *, 8> visited_containers{base_ptr};
+          while (!ptr_containers.empty()) {
+            Value *container = ptr_containers.pop_back_val();
+            for (Use &u : container->uses()) {
+              User *usr = u.getUser();
+              if (auto *c_gep = dyn_cast<GEPOperator>(usr)) {
+                if (visited_containers.insert(c_gep).second) {
+                  ptr_containers.push_back(c_gep);
+                }
+              } else if (auto *c_ld = dyn_cast<LoadInst>(usr)) {
+                if (c_ld->getType() == v->getType()) {
+                  worklist.push_back(std::make_pair(c_ld, 0));
+                }
+              } else if (auto *c_call = dyn_cast<CallInst>(usr)) {
+                if (auto *callee = c_call->getCalledFunction();
+                    callee && !callee->isDeclaration()) {
+                  Argument *arg = callee->getArg(u.getOperandNo());
+                  if (visited_containers.insert(arg).second) {
+                    ptr_containers.push_back(arg);
+                  }
+                }
+              }
+            }
+          }
+          continue;
         } else if (auto *value = dyn_cast<User>(store->getValueOperand())) {
           user = value;
         }
@@ -357,6 +452,17 @@ Type *InferUsersType(Value *v, LLVMContext &context,
         worklist.push_back(std::make_pair(use.getUser(), use.getOperandNo()));
       }
     }
+  }
+  if (can_alias_composite && composite_ty) {
+    for (GEPOperator *gep : direct_geps) {
+      if (!CanGEPAliasComposite(composite_ty, gep)) {
+        can_alias_composite = false;
+        break;
+      }
+    }
+  }
+  if (can_alias_composite && composite_ty) {
+    return composite_ty;
   }
   if (user_ty) {
     return user_ty;
@@ -374,8 +480,15 @@ Type *clspv::InferType(Value *v, LLVMContext &context,
   if (!isa<PointerType>(v->getType()))
     return v->getType();
 
+  if ((isa<ConstantPointerNull>(v) || isa<UndefValue>(v)) && TyHint) {
+    return TyHint;
+  }
+
   auto iter = cache->find(v);
   if (iter != cache->end()) {
+    if (iter->second == nullptr && TyHint != nullptr) {
+      return (*cache)[v] = TyHint;
+    }
     return iter->second;
   }
 
@@ -395,9 +508,17 @@ Type *clspv::InferType(Value *v, LLVMContext &context,
     return CacheType(func->getFunctionType());
   } else if (auto *select = dyn_cast<SelectInst>(v)) {
     const DataLayout &DL = select->getModule()->getDataLayout();
-    auto false_ty = InferType(select->getFalseValue(), context, cache);
-    auto true_ty = InferType(select->getTrueValue(), context, cache);
-    return CacheType(SmallerTypeNotAliasing(DL, false_ty, true_ty));
+    Type *false_ty = (isa<ConstantPointerNull>(select->getFalseValue()) ||
+                      isa<UndefValue>(select->getFalseValue()))
+                         ? nullptr
+                         : InferType(select->getFalseValue(), context, cache);
+    Type *true_ty = (isa<ConstantPointerNull>(select->getTrueValue()) ||
+                     isa<UndefValue>(select->getTrueValue()))
+                        ? nullptr
+                        : InferType(select->getTrueValue(), context, cache);
+    if (auto *sel_ty = SmallerTypeNotAliasing(DL, false_ty, true_ty)) {
+      return CacheType(sel_ty);
+    }
   } else if (auto *asc = dyn_cast<AddrSpaceCastOperator>(v)) {
     CacheType(nullptr);
     return CacheType(InferType(asc->getPointerOperand(), context, cache));
@@ -434,12 +555,20 @@ Type *clspv::InferType(Value *v, LLVMContext &context,
     const DataLayout &DL = phi->getModule()->getDataLayout();
     for (unsigned twice = 0; twice < 2; twice++) {
       for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        Value *inc_val = phi->getIncomingValue(i);
+        if (isa<ConstantPointerNull>(inc_val) || isa<UndefValue>(inc_val))
+          continue;
         (*cache)[phi] = phi_ty;
-        auto IncValTy = InferType(phi->getIncomingValue(i), context, cache);
-        if (phi_ty && IncValTy &&
-            BitcastUtils::SizeInBits(DL, phi_ty) >
-                BitcastUtils::SizeInBits(DL, IncValTy)) {
-          phi_ty = IncValTy;
+        auto IncValTy = InferType(inc_val, context, cache);
+        if (IncValTy) {
+          if (!phi_ty ||
+              BitcastUtils::SizeInBits(DL, phi_ty) >
+                  BitcastUtils::SizeInBits(DL, IncValTy) ||
+              (BitcastUtils::SizeInBits(DL, phi_ty) ==
+                   BitcastUtils::SizeInBits(DL, IncValTy) &&
+               IncValTy != users_ty)) {
+            phi_ty = IncValTy;
+          }
         }
       }
     }
@@ -452,11 +581,13 @@ Type *clspv::InferType(Value *v, LLVMContext &context,
   }
 
   // If we have not figured out the type yet and the value is a kernel function
-  // argument, deduce it from the arg info metadata if enabled.
-  if (clspv::Option::KernelArgInfo() && isa<Argument>(v)) {
+  // argument, deduce it from the arg info metadata if available.
+  if (isa<Argument>(v)) {
     auto arg = cast<Argument>(v);
     auto kernelFn = arg->getParent();
-    if (kernelFn->getCallingConv() == CallingConv::SPIR_KERNEL) {
+    if (kernelFn->getCallingConv() == CallingConv::SPIR_KERNEL &&
+        kernelFn->getMetadata("kernel_arg_type") &&
+        kernelFn->getMetadata("kernel_arg_access_qual")) {
       unsigned ordinal = arg->getArgNo();
       // If ClusterPodKernelArgumentsPass has transformed the kernel signature
       // we need to refer to the argument map to know the index of arguments
