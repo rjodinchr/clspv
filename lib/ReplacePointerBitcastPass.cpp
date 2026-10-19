@@ -548,10 +548,10 @@ bool DowngradeSourceToTy(const DataLayout &DL, Value *Src, Type *Ty) {
     GV->replaceAllUsesWith(new_GV);
     GV->eraseFromParent();
     changed = true;
-  } else if (auto Arg = dyn_cast<Argument>(Src)) {
+  } else if (!IsClspvResourceOrLocal(Src) && !isa<IntToPtrInst>(Src)) {
     SmallVector<User *, 16> UserWorkList;
     auto TySize = SizeInBits(DL, Ty);
-    for (auto *U : Arg->users()) {
+    for (auto *U : Src->users()) {
       UserWorkList.push_back(U);
     }
     while (!UserWorkList.empty()) {
@@ -559,7 +559,10 @@ bool DowngradeSourceToTy(const DataLayout &DL, Value *Src, Type *Ty) {
       UserWorkList.pop_back();
 
       auto gep = dyn_cast<GetElementPtrInst>(user);
-      if (gep && TySize < SizeInBits(DL, gep->getSourceElementType())) {
+      if (gep && (TySize < SizeInBits(DL, gep->getSourceElementType()) ||
+                  (TySize == SizeInBits(DL, gep->getSourceElementType()) &&
+                   gep->getSourceElementType()->isFloatingPointTy() &&
+                   Ty->isIntegerTy()))) {
         for (auto *U : user->users()) {
           UserWorkList.push_back(U);
         }
@@ -608,15 +611,28 @@ bool DowngradeModule(Module &M) {
                              ReplacePhysicalPointerBitcasts)) {
           continue;
         }
+        bool isAtomic = isa<AtomicRMWInst>(I);
+        if (auto *call = dyn_cast<CallInst>(&I)) {
+          if (auto *callee = call->getCalledFunction();
+              callee && !callee->getName().starts_with("llvm.memcpy")) {
+            isAtomic = true;
+          }
+        }
         bool isStore = isa<StoreInst>(I);
         if (!isStore) {
-          for (User *U : I.users()) {
+          SmallVector<User *, 8> Users(I.users());
+          while (!Users.empty()) {
+            User *U = Users.pop_back_val();
             if (isa<StoreInst>(U)) {
               isStore = true;
+              break;
+            }
+            if (isa<GetElementPtrInst>(U)) {
+              Users.append(U->user_begin(), U->user_end());
             }
           }
         }
-        if (!isStore && !IsComplexStruct(DL, source_ty)) {
+        if (!isStore && !IsComplexStruct(DL, source_ty) && !isAtomic) {
           continue;
         }
 
@@ -631,7 +647,9 @@ bool DowngradeModule(Module &M) {
         }
         size_t source_size = SizeInBits(DL, source_ty);
         size_t dest_size = SizeInBits(DL, dest_ty);
-        if (source_size > dest_size) {
+        if (source_size > dest_size ||
+            (isAtomic && source_ty->isFloatingPointTy() &&
+             dest_ty->isIntegerTy() && source_size == dest_size)) {
           if (isa<IntToPtrInst>(source)) {
             return DowngradeSourceToTy(DL, &I, dest_ty);
           } else {
