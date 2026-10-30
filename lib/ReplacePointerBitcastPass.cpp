@@ -548,10 +548,10 @@ bool DowngradeSourceToTy(const DataLayout &DL, Value *Src, Type *Ty) {
     GV->replaceAllUsesWith(new_GV);
     GV->eraseFromParent();
     changed = true;
-  } else if (auto Arg = dyn_cast<Argument>(Src)) {
+  } else if (!IsClspvResourceOrLocal(Src) && !isa<IntToPtrInst>(Src)) {
     SmallVector<User *, 16> UserWorkList;
     auto TySize = SizeInBits(DL, Ty);
-    for (auto *U : Arg->users()) {
+    for (auto *U : Src->users()) {
       UserWorkList.push_back(U);
     }
     while (!UserWorkList.empty()) {
