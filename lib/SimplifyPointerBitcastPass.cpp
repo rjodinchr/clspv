@@ -278,34 +278,38 @@ bool clspv::SimplifyPointerBitcastPass::runOnGEPFromGEP(Module &M) const {
     // StructSmallerBitWidths.
     int64_t StructCstVal = 0;
     size_t StructSmallerBitWidths = 0;
-    if (OtherGEP->getNumIndices() > 1) {
+    if (OtherGEP->getNumIndices() > 1 && GEP->hasAllConstantIndices() &&
+        !GEP->getSourceElementType()->isAggregateType()) {
+      auto &DL = M.getDataLayout();
+      Value *dynVal;
+      ExtractOffsetFromGEP(DL, Builder, GEP, StructCstVal, dynVal,
+                           StructSmallerBitWidths);
+      assert(dynVal == nullptr);
+      int64_t AccessSize =
+          DL.getTypeStoreSizeInBits(GEP->getResultElementType())
+              .getFixedValue();
       OtherGEPIdxs.append(SmallVector<Value *, 4>(OtherGEP->indices()));
-      OtherGEPLastIdx =
-          dyn_cast<ConstantInt>(OtherGEPIdxs[OtherGEP->getNumIndices() - 1]);
-      OtherGEPIdxs.pop_back();
-      OtherGEPPrevTy = GetElementPtrInst::getIndexedType(
-          OtherGEP->getSourceElementType(), OtherGEPIdxs);
-      OtherGEPPrevIsCstToStruct =
-          GEP->hasAllConstantIndices() && OtherGEPPrevTy &&
-          OtherGEPPrevTy->isStructTy() && OtherGEPLastIdx &&
-          !GEP->getSourceElementType()->isAggregateType();
-      if (OtherGEPPrevIsCstToStruct) {
-        auto &DL = M.getDataLayout();
-        Value *dynVal;
-        ExtractOffsetFromGEP(DL, Builder, GEP, StructCstVal, dynVal,
-                             StructSmallerBitWidths);
-        assert(dynVal == nullptr);
+      while (OtherGEPIdxs.size() > 1) {
+        OtherGEPLastIdx = dyn_cast<ConstantInt>(OtherGEPIdxs.back());
+        if (!OtherGEPLastIdx) {
+          break;
+        }
+        OtherGEPIdxs.pop_back();
+        OtherGEPPrevTy = GetElementPtrInst::getIndexedType(
+            OtherGEP->getSourceElementType(), OtherGEPIdxs);
+        if (!OtherGEPPrevTy || !OtherGEPPrevTy->isStructTy()) {
+          break;
+        }
         ExtractOffsetFromStruct(DL, OtherGEPLastIdx,
                                 cast<StructType>(OtherGEPPrevTy), StructCstVal,
                                 StructSmallerBitWidths);
         // Make sure the combined offset stays in the struct.
         int64_t OffsetInBits = StructCstVal * (int64_t)StructSmallerBitWidths;
-        int64_t AccessSize =
-            DL.getTypeStoreSizeInBits(GEP->getResultElementType())
-                .getFixedValue();
         int64_t StructSize = SizeInBits(DL, OtherGEPPrevTy);
-        OtherGEPPrevIsCstToStruct =
-            OffsetInBits >= 0 && OffsetInBits + AccessSize <= StructSize;
+        if (OffsetInBits >= 0 && OffsetInBits + AccessSize <= StructSize) {
+          OtherGEPPrevIsCstToStruct = true;
+          break;
+        }
       }
     }
 
