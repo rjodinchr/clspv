@@ -476,6 +476,10 @@ Type *clspv::InferType(Value *v, LLVMContext &context,
   if (!isa<PointerType>(v->getType()))
     return v->getType();
 
+  if ((isa<ConstantPointerNull>(v) || isa<UndefValue>(v)) && TyHint) {
+    return TyHint;
+  }
+
   auto iter = cache->find(v);
   if (iter != cache->end()) {
     if (iter->second == nullptr && TyHint != nullptr) {
@@ -500,9 +504,17 @@ Type *clspv::InferType(Value *v, LLVMContext &context,
     return CacheType(func->getFunctionType());
   } else if (auto *select = dyn_cast<SelectInst>(v)) {
     const DataLayout &DL = select->getModule()->getDataLayout();
-    auto false_ty = InferType(select->getFalseValue(), context, cache);
-    auto true_ty = InferType(select->getTrueValue(), context, cache);
-    return CacheType(SmallerTypeNotAliasing(DL, false_ty, true_ty));
+    Type *false_ty = (isa<ConstantPointerNull>(select->getFalseValue()) ||
+                      isa<UndefValue>(select->getFalseValue()))
+                         ? nullptr
+                         : InferType(select->getFalseValue(), context, cache);
+    Type *true_ty = (isa<ConstantPointerNull>(select->getTrueValue()) ||
+                     isa<UndefValue>(select->getTrueValue()))
+                        ? nullptr
+                        : InferType(select->getTrueValue(), context, cache);
+    if (auto *sel_ty = SmallerTypeNotAliasing(DL, false_ty, true_ty)) {
+      return CacheType(sel_ty);
+    }
   } else if (auto *asc = dyn_cast<AddrSpaceCastOperator>(v)) {
     CacheType(nullptr);
     return CacheType(InferType(asc->getPointerOperand(), context, cache));
@@ -539,12 +551,20 @@ Type *clspv::InferType(Value *v, LLVMContext &context,
     const DataLayout &DL = phi->getModule()->getDataLayout();
     for (unsigned twice = 0; twice < 2; twice++) {
       for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+        Value *inc_val = phi->getIncomingValue(i);
+        if (isa<ConstantPointerNull>(inc_val) || isa<UndefValue>(inc_val))
+          continue;
         (*cache)[phi] = phi_ty;
-        auto IncValTy = InferType(phi->getIncomingValue(i), context, cache);
-        if (phi_ty && IncValTy &&
-            BitcastUtils::SizeInBits(DL, phi_ty) >
-                BitcastUtils::SizeInBits(DL, IncValTy)) {
-          phi_ty = IncValTy;
+        auto IncValTy = InferType(inc_val, context, cache);
+        if (IncValTy) {
+          if (!phi_ty ||
+              BitcastUtils::SizeInBits(DL, phi_ty) >
+                  BitcastUtils::SizeInBits(DL, IncValTy) ||
+              (BitcastUtils::SizeInBits(DL, phi_ty) ==
+                   BitcastUtils::SizeInBits(DL, IncValTy) &&
+               IncValTy != users_ty)) {
+            phi_ty = IncValTy;
+          }
         }
       }
     }
