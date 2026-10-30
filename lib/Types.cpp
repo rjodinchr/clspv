@@ -306,19 +306,66 @@ Type *SmallerTypeNotAliasing(const DataLayout &DL, Type *TyA, Type *TyB) {
 
 // Returns the type of |v| inferred by inspecting its users.
 // Updates |cache|.
+bool CanGEPAliasComposite(Type *composite_ty, GEPOperator *gep) {
+  Type *target_ty = gep->getSourceElementType();
+  if (composite_ty == target_ty || gep->getNumOperands() <= 1)
+    return true;
+  auto *cst0 = dyn_cast<ConstantInt>(gep->getOperand(1));
+  if (!cst0)
+    return false;
+  if (cst0->isZero())
+    return true;
+  uint64_t idx = cst0->getZExtValue();
+  Type *curr = composite_ty;
+  while (curr != target_ty) {
+    if (auto *st = dyn_cast<StructType>(curr)) {
+      if (st->isOpaque() || st->getNumElements() == 0)
+        return false;
+      if (st->getElementType(0) == target_ty) {
+        return BitcastUtils::IsArrayLike(st) && idx < st->getNumElements();
+      }
+      curr = st->getElementType(0);
+    } else if (auto *arr = dyn_cast<ArrayType>(curr)) {
+      if (arr->getElementType() == target_ty) {
+        return idx < arr->getNumElements();
+      }
+      curr = arr->getElementType();
+    } else if (auto *vec = dyn_cast<FixedVectorType>(curr)) {
+      if (vec->getElementType() == target_ty) {
+        return idx < vec->getNumElements();
+      }
+      curr = vec->getElementType();
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
 Type *InferUsersType(Value *v, LLVMContext &context,
                      DenseMap<Value *, Type *> *cache) {
   std::vector<std::pair<User *, unsigned>> worklist;
+  SmallVector<GEPOperator *, 8> direct_geps;
   if (v->use_empty()) {
     return nullptr;
   }
 
   for (auto &use : v->uses()) {
     worklist.push_back(std::make_pair(use.getUser(), use.getOperandNo()));
+    if (auto *gep = dyn_cast<GEPOperator>(use.getUser())) {
+      if (use.getOperandNo() == 0) {
+        direct_geps.push_back(gep);
+      }
+    }
   }
 
   Type *backup_ty = nullptr;
   Type *user_ty = nullptr;
+  Type *composite_ty = nullptr;
+  bool can_alias_composite = isa<Argument>(v) &&
+                             cast<Argument>(v)->getParent()->getCallingConv() !=
+                                 CallingConv::SPIR_KERNEL &&
+                             !clspv::IsPhysicalSSBOType(v->getType());
   DenseSet<Value *> seen;
   while (!worklist.empty()) {
     User *user = worklist.back().first;
@@ -339,6 +386,25 @@ Type *InferUsersType(Value *v, LLVMContext &context,
     Type *user_backup_ty = nullptr;
     Type *ty = InferUserType(user, isPointerTy, operand, user_backup_ty,
                              context, cache, v);
+    if (ty && can_alias_composite) {
+      if (!composite_ty) {
+        composite_ty = ty;
+      } else if (composite_ty != ty) {
+        int steps = 0;
+        bool perfect_match = false;
+        if (BitcastUtils::FindAliasingContainedType(composite_ty, ty, steps,
+                                                    perfect_match, DL, false) &&
+            perfect_match) {
+          // Keep composite_ty.
+        } else if (BitcastUtils::FindAliasingContainedType(
+                       ty, composite_ty, steps, perfect_match, DL, false) &&
+                   perfect_match) {
+          composite_ty = ty;
+        } else {
+          can_alias_composite = false;
+        }
+      }
+    }
     user_ty = SmallerTypeNotAliasing(DL, user_ty, ty);
     if (user_ty == nullptr) {
       backup_ty = SmallerTypeNotAliasing(DL, backup_ty, user_backup_ty);
@@ -387,6 +453,12 @@ Type *InferUsersType(Value *v, LLVMContext &context,
         worklist.push_back(std::make_pair(use.getUser(), use.getOperandNo()));
       }
     }
+  }
+  if (can_alias_composite && composite_ty &&
+      llvm::all_of(direct_geps, [&](GEPOperator *gep) {
+        return CanGEPAliasComposite(composite_ty, gep);
+      })) {
+    return composite_ty;
   }
   if (user_ty) {
     return user_ty;
